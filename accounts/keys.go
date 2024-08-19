@@ -23,13 +23,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
-	"regexp"
 	"strings"
+
+	awscfg "github.com/aws/aws-sdk-go-v2/config"
 
 	"github.com/lmars/go-slip10"
 	"github.com/onflow/flow-go-sdk/crypto"
-	"github.com/onflow/flow-go-sdk/crypto/cloudkms"
+	"github.com/onflow/flow-go-sdk/crypto/awskms"
 	goeth "github.com/onflow/go-ethereum/accounts"
 	"github.com/tyler-smith/go-bip39"
 
@@ -131,7 +131,7 @@ func (a *baseKey) Validate() error {
 // KMSKey implements Gcloud KMS system for signing.
 type KMSKey struct {
 	*baseKey
-	kmsKey cloudkms.Key
+	kmsKey awskms.Key
 }
 
 // ToConfig convert account key to configuration.
@@ -141,15 +141,14 @@ func (a *KMSKey) ToConfig() config.AccountKey {
 		Index:      a.index,
 		SigAlgo:    a.sigAlgo,
 		HashAlgo:   a.hashAlgo,
-		ResourceID: a.kmsKey.ResourceID(),
+		ResourceID: a.kmsKey.ARN(),
 	}
 }
 
 func (a *KMSKey) Signer(ctx context.Context) (crypto.Signer, error) {
-	kmsClient, err := cloudkms.NewClient(ctx)
-	if err != nil {
-		return nil, err
-	}
+	defaultCfg, _ := awscfg.LoadDefaultConfig(ctx)
+
+	kmsClient := awskms.NewClient(defaultCfg)
 
 	accountKMSSigner, err := kmsClient.SignerForKey(
 		ctx,
@@ -163,53 +162,15 @@ func (a *KMSKey) Signer(ctx context.Context) (crypto.Signer, error) {
 }
 
 func (a *KMSKey) Validate() error {
-	return gcloudApplicationSignin(a.kmsKey.ResourceID())
+	return nil
 }
 
 func (a *KMSKey) PrivateKey() (*crypto.PrivateKey, error) {
 	return nil, fmt.Errorf("private key not accessible")
 }
 
-// gcloudApplicationSignin signs in as an application user using gcloud command line tool
-// currently assumes gcloud is already installed on the machine
-// will by default pop a browser window to sign in
-func gcloudApplicationSignin(resourceID string) error {
-	googleAppCreds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
-	if len(googleAppCreds) > 0 {
-		return nil
-	}
-
-	kms, err := cloudkms.KeyFromResourceID(resourceID)
-	if err != nil {
-		return err
-	}
-
-	proj := kms.ProjectID
-	if len(proj) == 0 {
-		return fmt.Errorf(
-			"could not get GOOGLE_APPLICATION_CREDENTIALS, no google service account JSON provided but private key type is KMS",
-		)
-	}
-
-	loginCmd := exec.Command("gcloud", "auth", "application-default", "login", fmt.Sprintf("--project=%s", proj))
-
-	output, err := loginCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("Failed to run %q: %s\n", loginCmd.String(), err)
-	}
-
-	squareBracketRegex := regexp.MustCompile(`(?s)\[(.*)\]`)
-	regexResult := squareBracketRegex.FindAllStringSubmatch(string(output), -1)
-	// Should only be one value. Second index since first index contains the square brackets
-	googleApplicationCreds := regexResult[0][1]
-
-	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", googleApplicationCreds)
-
-	return nil
-}
-
 func kmsKeyFromConfig(key config.AccountKey) (Key, error) {
-	accountKMSKey, err := cloudkms.KeyFromResourceID(key.ResourceID)
+	accountKMSKey, err := awskms.KeyFromResourceARN(key.ResourceID)
 	if err != nil {
 		return nil, err
 	}
